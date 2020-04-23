@@ -25,6 +25,45 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+var (
+	invalidRfc3645Configs = []*externaldns.Config{
+		{
+			LogFormat:           "json",
+			Sources:             []string{"test-source"},
+			Provider:            "rfc3645",
+			RFC3645AuthUsername: "test-user",
+			RFC3645AuthPassword: "",
+			RFC3645MinTTL:       3600,
+		},
+		{
+			LogFormat:           "json",
+			Sources:             []string{"test-source"},
+			Provider:            "rfc3645",
+			RFC3645AuthUsername: "",
+			RFC3645AuthPassword: "test-pass",
+			RFC3645MinTTL:       3600,
+		},
+		{
+			LogFormat:           "json",
+			Sources:             []string{"test-source"},
+			Provider:            "rfc3645",
+			RFC3645AuthUsername: "test-user",
+			RFC3645AuthPassword: "test-pass",
+			RFC3645MinTTL:       -1,
+		},
+	}
+	validRfc3645Configs = []*externaldns.Config{
+		{
+			LogFormat:           "json",
+			Sources:             []string{"test-source"},
+			Provider:            "rfc3645",
+			RFC3645AuthUsername: "test-user",
+			RFC3645AuthPassword: "test-pass",
+			RFC3645MinTTL:       3600,
+		},
+	}
+)
+
 func TestValidateFlags(t *testing.T) {
 	cfg := newValidConfig(t)
 	assert.NoError(t, ValidateConfig(cfg))
@@ -73,27 +112,17 @@ func TestValidateBadIgnoreHostnameAnnotationsConfig(t *testing.T) {
 }
 
 func TestValidateBadRfc3645Config(t *testing.T) {
-	cfg := externaldns.NewConfig()
+	for _, cfg := range invalidRfc3645Configs {
+		err := ValidateConfig(cfg)
 
-	cfg.LogFormat = "json"
-	cfg.Sources = []string{"test-source"}
-	cfg.Provider = "rfc3645"
-	cfg.RFC3645MinTTL = -1
-
-	err := ValidateConfig(cfg)
-
-	assert.NotNil(t, err)
+		assert.NotNil(t, err)
+	}
 }
 
 func TestValidateGoodRfc3645Config(t *testing.T) {
-	cfg := externaldns.NewConfig()
+	for _, cfg := range validRfc3645Configs {
+		err := ValidateConfig(cfg)
 
-	cfg.LogFormat = "json"
-	cfg.Sources = []string{"test-source"}
-	cfg.Provider = "rfc3645"
-	cfg.RFC3645MinTTL = 3600
-
-	err := ValidateConfig(cfg)
-
-	assert.Nil(t, err)
+		assert.Nil(t, err)
+	}
 }
