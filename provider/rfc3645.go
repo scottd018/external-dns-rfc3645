@@ -17,7 +17,6 @@ limitations under the License.
 package provider
 
 import (
-	"context"
 	"fmt"
 	"net"
 	"strconv"
@@ -32,16 +31,10 @@ import (
 	log "github.com/sirupsen/logrus"
 
 	"sigs.k8s.io/external-dns/endpoint"
-	"sigs.k8s.io/external-dns/plan"
 )
 
-// rfc3645 provider type
-type rfc3645Provider struct {
-	rawHost    string
-	nameserver string
-	zoneName   string
-	minTTL     time.Duration
-
+// rfc3645 configuration
+type rfc3645Config struct {
 	// gss-tsig specific fields when using a keytab
 	keytabSecret string
 
@@ -50,34 +43,33 @@ type rfc3645Provider struct {
 	password   string
 	krb5Config string
 	krb5Realm  string
-
-	// only consider hosted zones managing domains ending in this suffix
-	domainFilter endpoint.DomainFilter
-	axfr         bool
-	dryRun       bool
-	actions      rfc3645Actions
 }
 
-type rfc3645Actions interface {
-	SendMessage(msg *dns.Msg) error
-	IncomeTransfer(m *dns.Msg, a string) (env chan *dns.Envelope, err error)
+// rfc3645 provider type
+type rfc3645Provider struct {
+	rfcProvider
+	rfc3645Config
 }
 
 // NewRfc3645Provider is a factory function for OpenStack rfc3645 providers
-func NewRfc3645Provider(host string, port int, zoneName string, keytabSecret string, username string, password string, krb5Config string, axfr bool, domainFilter endpoint.DomainFilter, dryRun bool, minTTL time.Duration, actions rfc3645Actions) (Provider, error) {
+func NewRfc3645Provider(host string, port int, zoneName string, keytabSecret string, username string, password string, krb5Config string, axfr bool, domainFilter endpoint.DomainFilter, dryRun bool, minTTL time.Duration, actions rfcActions) (Provider, error) {
 	r := &rfc3645Provider{
-		rawHost:      host,
-		nameserver:   net.JoinHostPort(host, strconv.Itoa(port)),
-		zoneName:     dns.Fqdn(zoneName),
-		keytabSecret: keytabSecret,
-		username:     username,
-		password:     password,
-		krb5Config:   krb5Config,
-		krb5Realm:    strings.ToUpper(zoneName),
-		minTTL:       minTTL,
-		axfr:         axfr,
-		domainFilter: domainFilter,
-		dryRun:       dryRun,
+		rfcProvider{
+			host:         host,
+			nameserver:   net.JoinHostPort(host, strconv.Itoa(port)),
+			zoneName:     dns.Fqdn(zoneName),
+			minTTL:       minTTL,
+			axfr:         axfr,
+			domainFilter: domainFilter,
+			dryRun:       dryRun,
+		},
+		rfc3645Config{
+			keytabSecret: keytabSecret,
+			username:     username,
+			password:     password,
+			krb5Config:   krb5Config,
+			krb5Realm:    strings.ToUpper(zoneName),
+		},
 	}
 	if actions != nil {
 		r.actions = actions
@@ -89,209 +81,38 @@ func NewRfc3645Provider(host string, port int, zoneName string, keytabSecret str
 	return r, nil
 }
 
-// KeyData will return TKEY metadata to use for followon actions with an a secure connection
-func (r rfc3645Provider) KeyData(g *gss.GSS) (*string, error) {
+// KeyName will return TKEY name and TSIG handle to use for followon actions with an a secure connection
+func (r rfc3645Provider) KeyData() (keyName *string, handle *gss.GSS, err error) {
+	handle, err = gss.New()
+	if err != nil {
+		return keyName, handle, err
+	}
+
 	if r.keytabSecret != "" {
 		// TODO: this is unimplemented upstream and will always return an error
 		//       the empty string in the function call should eventually be the path to a keytab
 		//       as mounted via a secret
-		keyData, _, err := g.NegotiateContextWithKeytab(r.rawHost, r.zoneName, r.username, "")
-		return keyData, err
+		keyName, _, err := handle.NegotiateContextWithKeytab(r.host, r.zoneName, r.username, "")
+		return keyName, handle, err
 	} else if r.username != "" && r.password != "" {
-		keyData, _, err := g.NegotiateContextWithCredentials(r.rawHost, r.krb5Realm, r.username, r.password)
-		return keyData, err
+		keyName, _, err := handle.NegotiateContextWithCredentials(r.host, r.krb5Realm, r.username, r.password)
+		return keyName, handle, err
 	}
-	return nil, fmt.Errorf("failed to fetch TKEY data")
-}
-
-// Records returns the list of records.
-func (r rfc3645Provider) Records(ctx context.Context) ([]*endpoint.Endpoint, error) {
-	rrs, err := r.List()
-	if err != nil {
-		return nil, err
-	}
-
-	var eps []*endpoint.Endpoint
-
-OuterLoop:
-	for _, rr := range rrs {
-		log.Debugf("Record=%s", rr)
-
-		if rr.Header().Class != dns.ClassINET {
-			continue
-		}
-
-		rrFqdn := rr.Header().Name
-		rrTTL := endpoint.TTL(rr.Header().Ttl)
-		var rrType string
-		var rrValues []string
-		switch rr.Header().Rrtype {
-		case dns.TypeCNAME:
-			rrValues = []string{rr.(*dns.CNAME).Target}
-			rrType = "CNAME"
-		case dns.TypeA:
-			rrValues = []string{rr.(*dns.A).A.String()}
-			rrType = "A"
-		case dns.TypeAAAA:
-			rrValues = []string{rr.(*dns.AAAA).AAAA.String()}
-			rrType = "AAAA"
-		case dns.TypeTXT:
-			rrValues = (rr.(*dns.TXT).Txt)
-			rrType = "TXT"
-		default:
-			continue // Unhandled record type
-		}
-
-		for idx, existingEndpoint := range eps {
-			if existingEndpoint.DNSName == strings.TrimSuffix(rrFqdn, ".") && existingEndpoint.RecordType == rrType {
-				eps[idx].Targets = append(eps[idx].Targets, rrValues...)
-				continue OuterLoop
-			}
-		}
-
-		ep := endpoint.NewEndpointWithTTL(
-			rrFqdn,
-			rrType,
-			rrTTL,
-			rrValues...,
-		)
-
-		eps = append(eps, ep)
-	}
-
-	return eps, nil
+	return keyName, handle, fmt.Errorf("failed to fetch TKEY data")
 }
 
 func (r rfc3645Provider) IncomeTransfer(m *dns.Msg, a string) (env chan *dns.Envelope, err error) {
 	t := new(dns.Transfer)
+	keyName, handle, err := r.KeyData()
+	if err != nil {
+		return env, err
+	}
+	defer handle.Close()
+
+	m.SetTsig(*keyName, tsig.GSS, clockSkew, time.Now().Unix())
+	t.TsigSecret = map[string]string{*keyName: ""}
+
 	return t.In(m, r.nameserver)
-}
-
-func (r rfc3645Provider) List() ([]dns.RR, error) {
-	if !r.axfr {
-		log.Debug("axfr is disabled")
-		return make([]dns.RR, 0), nil
-	}
-
-	log.Debugf("Fetching records for '%s'", r.zoneName)
-
-	m := new(dns.Msg)
-	m.SetAxfr(r.zoneName)
-
-	env, err := r.actions.IncomeTransfer(m, r.nameserver)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch records via AXFR: %v", err)
-	}
-
-	records := make([]dns.RR, 0)
-	for e := range env {
-		if e.Error != nil {
-			if e.Error == dns.ErrSoa {
-				log.Error("AXFR error: unexpected response received from the server")
-			} else {
-				log.Errorf("AXFR error: %v", e.Error)
-			}
-			continue
-		}
-		records = append(records, e.RR...)
-	}
-
-	return records, nil
-}
-
-// ApplyChanges applies a given set of changes in a given zone.
-func (r rfc3645Provider) ApplyChanges(ctx context.Context, changes *plan.Changes) error {
-	log.Debugf("ApplyChanges (Create: %d, UpdateOld: %d, UpdateNew: %d, Delete: %d)", len(changes.Create), len(changes.UpdateOld), len(changes.UpdateNew), len(changes.Delete))
-
-	m := new(dns.Msg)
-	m.SetUpdate(r.zoneName)
-
-	for _, ep := range changes.Create {
-
-		if !r.domainFilter.Match(ep.DNSName) {
-			log.Debugf("Skipping record %s because it was filtered out by the specified --domain-filter", ep.DNSName)
-			continue
-		}
-
-		r.AddRecord(m, ep)
-	}
-	for _, ep := range changes.UpdateNew {
-
-		if !r.domainFilter.Match(ep.DNSName) {
-			log.Debugf("Skipping record %s because it was filtered out by the specified --domain-filter", ep.DNSName)
-			continue
-		}
-
-		r.UpdateRecord(m, ep)
-	}
-	for _, ep := range changes.Delete {
-
-		if !r.domainFilter.Match(ep.DNSName) {
-			log.Debugf("Skipping record %s because it was filtered out by the specified --domain-filter", ep.DNSName)
-			continue
-		}
-
-		r.RemoveRecord(m, ep)
-	}
-
-	// only send if there are records available
-	if len(m.Ns) > 0 {
-		err := r.actions.SendMessage(m)
-		if err != nil {
-			return fmt.Errorf("RFC3645 update failed: %v", err)
-		}
-	}
-
-	return nil
-}
-
-func (r rfc3645Provider) UpdateRecord(m *dns.Msg, ep *endpoint.Endpoint) error {
-	err := r.RemoveRecord(m, ep)
-	if err != nil {
-		return err
-	}
-
-	return r.AddRecord(m, ep)
-}
-
-func (r rfc3645Provider) AddRecord(m *dns.Msg, ep *endpoint.Endpoint) error {
-	log.Debugf("AddRecord.ep=%s", ep)
-
-	var ttl = int64(r.minTTL.Seconds())
-	if ep.RecordTTL.IsConfigured() && int64(ep.RecordTTL) > ttl {
-		ttl = int64(ep.RecordTTL)
-	}
-
-	for _, target := range ep.Targets {
-		newRR := fmt.Sprintf("%s %d %s %s", ep.DNSName, ttl, ep.RecordType, target)
-		log.Infof("Adding RR: %s", newRR)
-
-		rr, err := dns.NewRR(newRR)
-		if err != nil {
-			return fmt.Errorf("failed to build RR: %v", err)
-		}
-
-		m.Insert([]dns.RR{rr})
-	}
-
-	return nil
-}
-
-func (r rfc3645Provider) RemoveRecord(m *dns.Msg, ep *endpoint.Endpoint) error {
-	log.Debugf("RemoveRecord.ep=%s", ep)
-	for _, target := range ep.Targets {
-		newRR := fmt.Sprintf("%s %d %s %s", ep.DNSName, ep.RecordTTL, ep.RecordType, target)
-		log.Infof("Removing RR: %s", newRR)
-
-		rr, err := dns.NewRR(newRR)
-		if err != nil {
-			return fmt.Errorf("failed to build RR: %v", err)
-		}
-
-		m.Remove([]dns.RR{rr})
-	}
-
-	return nil
 }
 
 func (r rfc3645Provider) SendMessage(msg *dns.Msg) error {
@@ -301,16 +122,11 @@ func (r rfc3645Provider) SendMessage(msg *dns.Msg) error {
 	}
 	log.Debugf("SendMessage")
 
-	handle, err := gss.New()
+	keyName, handle, err := r.KeyData()
 	if err != nil {
 		return err
 	}
 	defer handle.Close()
-
-	keyData, err := r.KeyData(handle)
-	if err != nil {
-		return err
-	}
 
 	c := gssClient.Client{}
 	c.TsigAlgorithm = map[string]*gssClient.TsigAlgorithm{
@@ -319,10 +135,10 @@ func (r rfc3645Provider) SendMessage(msg *dns.Msg) error {
 			Verify:   handle.VerifyGSS,
 		},
 	}
-	c.TsigSecret = map[string]string{*keyData: ""}
+	c.TsigSecret = map[string]string{*keyName: ""}
 	c.SingleInflight = true
 
-	msg.SetTsig(*keyData, tsig.GSS, 30, time.Now().Unix())
+	msg.SetTsig(*keyName, tsig.GSS, 30, time.Now().Unix())
 
 	resp, _, err := c.Exchange(msg, r.nameserver)
 	if err != nil {

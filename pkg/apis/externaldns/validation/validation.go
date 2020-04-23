@@ -40,6 +40,14 @@ func ValidateConfig(cfg *externaldns.Config) error {
 		if cfg.RFC3645MinTTL < 0 {
 			return errors.New("TTL specified for rfc3645 is negative")
 		}
+
+		if cfg.RFC3645AuthPassword == "" && cfg.RFC3645AuthUsername != "" {
+			return errors.New("--rfc3645-auth-username provided without specifying --rfc3645-auth-password")
+		}
+
+		if cfg.RFC3645AuthPassword != "" && cfg.RFC3645AuthUsername == "" {
+			return errors.New("--rfc3645-auth-password provided without specifying --rfc3645-auth-username")
+		}
 	}
 
 	if cfg.IgnoreHostnameAnnotation && cfg.FQDNTemplate == "" {

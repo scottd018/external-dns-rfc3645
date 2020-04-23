@@ -78,7 +78,7 @@ func TestValidateBadRfc3645Config(t *testing.T) {
 	cfg.LogFormat = "json"
 	cfg.Sources = []string{"test-source"}
 	cfg.Provider = "rfc3645"
-	cfg.RFC2136MinTTL = -1
+	cfg.RFC3645MinTTL = -1
 
 	err := ValidateConfig(cfg)
 
@@ -91,7 +91,7 @@ func TestValidateGoodRfc3645Config(t *testing.T) {
 	cfg.LogFormat = "json"
 	cfg.Sources = []string{"test-source"}
 	cfg.Provider = "rfc3645"
-	cfg.RFC2136MinTTL = 3600
+	cfg.RFC3645MinTTL = 3600
 
 	err := ValidateConfig(cfg)
 
