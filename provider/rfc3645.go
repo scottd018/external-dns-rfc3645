@@ -103,14 +103,6 @@ func (r rfc3645Provider) KeyData() (keyName *string, handle *gss.GSS, err error)
 
 func (r rfc3645Provider) IncomeTransfer(m *dns.Msg, a string) (env chan *dns.Envelope, err error) {
 	t := new(dns.Transfer)
-	keyName, handle, err := r.KeyData()
-	if err != nil {
-		return env, err
-	}
-	defer handle.Close()
-
-	m.SetTsig(*keyName, tsig.GSS, clockSkew, time.Now().Unix())
-	t.TsigSecret = map[string]string{*keyName: ""}
 
 	return t.In(m, r.nameserver)
 }
